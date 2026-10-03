@@ -1,0 +1,80 @@
+name: index-options-scanner
+
+# Two sessions per trading day (GitHub-hosted jobs can run max 6 h):
+#   A  08:00 -> 13:50 IST : token, 08:30 brief, 09:25 opening check, OI monitor
+#   B  13:55 -> 15:50 IST : OI monitor till close, 15:40 EOD summary
+# Primary trigger: cron-job.org (or the Cloudflare Worker in deploy/) calling workflow_dispatch
+# at the exact time. The `schedule` lines are only a backup - GitHub may start them late.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "auto (pick session by time) | premarket | monitor | eod | token | test-telegram"
+        default: auto
+  schedule:
+    - cron: "31 2 * * 1-5"   # 08:01 IST  (session A backup)
+    - cron: "26 8 * * 1-5"   # 13:56 IST  (session B backup)
+
+concurrency:
+  group: scanner-${{ github.event.inputs.command || 'auto' }}
+  cancel-in-progress: false   # a duplicate trigger just waits, then exits immediately (past --until)
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    env:
+      TZ: Asia/Kolkata
+      DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+      DHAN_PIN: ${{ secrets.DHAN_PIN }}
+      DHAN_TOTP_SECRET: ${{ secrets.DHAN_TOTP_SECRET }}
+      DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GIFT_NIFTY_URL: ${{ secrets.GIFT_NIFTY_URL }}
+      EXTRA_HOLIDAYS: ${{ vars.EXTRA_HOLIDAYS }}
+      MONITOR_INTERVAL_MIN: ${{ vars.MONITOR_INTERVAL_MIN || '3' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Decide session
+        id: s
+        run: |
+          echo "day=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          CMD="${{ github.event.inputs.command || 'auto' }}"
+          if [ "$CMD" = "auto" ]; then
+            if [ "$(date +%H%M)" -lt 1300 ]; then CMD="run --until 13:50"; else CMD="run --until 15:50"; fi
+          fi
+          echo "cmd=$CMD" >> "$GITHUB_OUTPUT"
+          echo "Session command: $CMD (IST now $(date +%H:%M))"
+
+      # carry today's intraday OI state from session A to session B (no secrets inside)
+      - name: Restore today's state
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: state-${{ steps.s.outputs.day }}-none
+          restore-keys: state-${{ steps.s.outputs.day }}-
+
+      - name: Run scanner
+        run: python -m scanner ${{ steps.s.outputs.cmd }}
+
+      - name: Strip secrets from state
+        if: always()
+        run: rm -f data/dhan_token.json data/scanner.log
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: state-${{ steps.s.outputs.day }}-${{ github.run_id }}-${{ github.run_attempt }}
