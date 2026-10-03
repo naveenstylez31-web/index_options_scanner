@@ -1,0 +1,6 @@
+requests>=2.31
+pandas>=2.0
+yfinance>=0.2.40
+feedparser>=6.0
+pyotp>=2.9
+python-dotenv>=1.0
