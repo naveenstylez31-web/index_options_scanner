@@ -1,0 +1,17 @@
+# Linux VPS: sudo cp deploy/index-scanner.service /etc/systemd/system/
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now index-scanner
+[Unit]
+Description=Nifty/Sensex options scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/index-options-scanner
+ExecStart=/home/ubuntu/index-options-scanner/.venv/bin/python -m scanner run
+Restart=always
+RestartSec=30
+Environment=TZ=Asia/Kolkata
+
+[Install]
+WantedBy=multi-user.target
